@@ -3,27 +3,14 @@
 #  Copyright (c) 2025 Sameer Al Sahab
 #  Licensed under the MIT License. See LICENSE file for details.
 #
-#  Permission is hereby granted, free of charge, to any person obtaining a copy
-#  of this software and associated documentation files (the "Software"), to deal
-#  in the Software without restriction, including without limitation the rights
-#  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-#  copies of the Software, and to permit persons to whom the Software is
-#  furnished to do so, subject to the following conditions:
-#
-#  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-#  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-#
 
 # Special Thanks to @BlackMesa123 for his help and hints on github issues
 
-# Sources:
 # https://github.com/iBotPeaches/Apktool/issues/3775
 # https://github.com/iBotPeaches/Apktool/pull/3879
 # https://github.com/SameerAlSahab/smali_patch/blob/main/smali_patch.py
 # https://github.com/iBotPeaches/Apktool/issues/1775
 
-DEFAULT_SDK="36"  #branch sixteen
 
 PATCH_MARKER_FILE="$WORKSPACE/.patch_markers"
 
@@ -33,12 +20,6 @@ CERT_PK8=""
 
 DECOMPILE_RES=true
 
-APK_TO_DECOMPILE_RES=(
-    product_overlay.apk
-    #wallpaper-res.apk
-    #SecSettings.apk
-    #SystemUI.apk
-)
 
 declare -A PATCH_CACHE
 
@@ -120,57 +101,13 @@ DECOMPILE()
     LOG_INFO "Decompiling $NAME"
 
     local SDK=$(INSTALL_FRAMEWORK)
-    local API="$SDK"
-    local TEMP_DEX=$(mktemp)
-    local DEX_MAGIC=""
-
-    if unzip -p "$FILE" "classes.dex" > "$TEMP_DEX" 2>/dev/null; then
-        API=$(GET_DEX_API "$TEMP_DEX")
-        DEX_MAGIC=$(xxd -s 4 -l 4 -p "$TEMP_DEX")
-    fi
-    rm -f "$TEMP_DEX"
 
     mkdir -p "$WORK_DIR/.meta"
     echo "$API" > "$WORK_DIR/.meta/api"
     echo "$SDK" > "$WORK_DIR/.meta/sdk"
 
-    # DEX v041 Container Bypass (OneUI 8+). I saw OneUI8+ uses dex 041 for services.jar
-    if [[ "$DEX_MAGIC" == "30343100" ]]; then
-
-        # Decompile with --no-src
-        java -jar "$PREBUILTS/apktool/apktool.jar" d -api "$API" -f -j "$USABLE_THREADS" \
-            -o "$WORK_DIR" -p "$FRAMEWORK_DIR" -t "$SDK" -s "$FILE" > /dev/null 2>&1 || \
-            ERROR_EXIT "Decompile failed"
-
-        # Baksmali each dex parts
-        local PART=1
-        while true; do
-            local INPUT="$FILE/classes.dex"
-            local OUT="smali"
-            [[ $PART -gt 1 ]] && INPUT="$FILE/classes.dex/$PART" && OUT="smali_classes$PART"
-
-            java -jar "$PREBUILTS/smali/baksmali.jar" d -a "$API" -j "$USABLE_THREADS" \
-                --ac false --di false -l -o "$WORK_DIR/$OUT" "$INPUT" > /dev/null 2>&1
-
-            if [[ $? -ne 0 || ! -d "$WORK_DIR/$OUT" ]]; then
-                rm -rf "$WORK_DIR/$OUT"
-                break
-            fi
-
-            ((PART++))
-            [[ $PART -gt 99 ]] && break
-        done
-        rm -f "$WORK_DIR/classes"*.dex
-    else
-
         # Standard flags
         local FLAGS=("-f" "-j" "$USABLE_THREADS" "-o" "$WORK_DIR" "-p" "$FRAMEWORK_DIR"  )
-
-        # Resource decompile for listed APKs we declared on top
-        local IN_LIST="false"
-        for ITEM in "${APK_TO_DECOMPILE_RES[@]}"; do
-            [[ "$ITEM" == "$NAME" ]] && IN_LIST="true" && break
-        done
 
         if ! GET_FEATURE "DECOMPILE_RES" || [[ "$IN_LIST" != "true" ]]; then
             FLAGS+=("-r")
@@ -179,20 +116,6 @@ DECOMPILE()
         # --no-debug-info is equals to baksmali --ac false and other flags and similarly use .locals instead of registers , so we can skip baksmali here.
         java -jar "$PREBUILTS/apktool/apktool.jar" d --no-debug-info "${FLAGS[@]}" "$FILE" > /dev/null 2>&1 || \
             ERROR_EXIT "Decompile failed"
-
-
-        # Baksmali all DEX files
-        #find "$WORK_DIR" -maxdepth 1 -name "*.dex" | while read -r DEX; do
-        #    local D_NAME=$(basename "$DEX")
-        #    local OUT="smali"
-        #    [[ "$D_NAME" != "classes.dex" ]] && OUT="smali_${D_NAME%.dex}"
-
-        #   java -jar "$PREBUILTS/smali/baksmali.jar" d -a "$API" --ac false --di false \
-        #        -j "$USABLE_THREADS" -l -o "$WORK_DIR/$OUT" "$DEX" > /dev/null 2>&1
-
-        #   rm -f "$DEX"
-        #done
-    fi
 
     # Extract extra resources for JARs (Issue found on OneUI6+)
     if [[ "$EXT" == "jar" ]] && unzip -l "$FILE" | grep -q "debian.mime.types"; then
