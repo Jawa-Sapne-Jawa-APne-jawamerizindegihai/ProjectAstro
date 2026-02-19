@@ -30,7 +30,7 @@ ROM_VERSION=$(echo "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}${VERSION_
 BETA_ASSERT=false
 BETA_OTA_URL=""
 DEBUG_BUILD=false
-TARGET=""
+OBJECTIVE=""
 PLATFORM=""
 CODENAME=""
 
@@ -51,12 +51,12 @@ MARKER_FILE="$WORKSPACE/.build_markers"
 
 
 
-AVAILABLE_TARGETS=()
+AVAILABLE_OBJECTIVES=()
 
 if [[ -d "$OBJECTIVES_DIR" ]]; then
     for D in "$OBJECTIVES_DIR"/*/; do
         [[ -d "$D" ]] || continue
-        AVAILABLE_TARGETS+=("$(basename "$D")")
+        AVAILABLE_OBJECTIVES+=("$(basename "$D")")
     done
 fi
 
@@ -139,29 +139,29 @@ _BUILD_ROM() {
     rm -rf "$DIROUT" && mkdir -p "$DIROUT"
     
     # Check for available objectives
-    AVAILABLE_TARGETS=()
+    AVAILABLE_OBJECTIVES=()
     if [[ -d "$OBJECTIVES_DIR" ]]; then
         for D in "$OBJECTIVES_DIR"/*/; do
-            [[ -d "$D" ]] && AVAILABLE_TARGETS+=("$(basename "$D")")
+            [[ -d "$D" ]] && AVAILABLE_OBJECTIVES+=("$(basename "$D")")
         done
     fi
 
-    if [[ -z "$TARGET" ]]; then
-        [[ ${#AVAILABLE_TARGETS[@]} -eq 0 ]] && ERROR_EXIT "No objectives found."
+    if [[ -z "$OBJECTIVE" ]]; then
+        [[ ${#AVAILABLE_OBJECTIVES[@]} -eq 0 ]] && ERROR_EXIT "No objectives found."
         local CHOICE
-        CHOICE=$(PROMPT_CHOICE "Select Target TARGET" "${AVAILABLE_TARGETS[@]}")
-        TARGET="${AVAILABLE_TARGETS[CHOICE-1]}"
+        CHOICE=$(PROMPT_CHOICE "Select OBJECTIVE OBJECTIVE" "${AVAILABLE_OBJECTIVES[@]}")
+        OBJECTIVE="${AVAILABLE_OBJECTIVES[CHOICE-1]}"
     fi
 
-    OBJECTIVE="$OBJECTIVES_DIR/$TARGET"
+    OBJECTIVE="$OBJECTIVES_DIR/$OBJECTIVE"
     export OBJECTIVE
-    source "$OBJECTIVE/$TARGET.sh" || ERROR_EXIT "TARGET config load failed"
+    source "$OBJECTIVE/$OBJECTIVE.sh" || ERROR_EXIT "OBJECTIVE config load failed"
 
     # Setup Environment
-    if [[ ! -f "$MARKER_FILE" ]] || [[ "$(grep "last_objective" "$MARKER_FILE" | awk '{print $2}')" != "$TARGET" ]]; then
-        LOG_INFO "Initializing environment for $TARGET..."
-        SETUP_TARGET_ENV || ERROR_EXIT "Setup failed"
-        echo "last_objective $TARGET" > "$MARKER_FILE"
+    if [[ ! -f "$MARKER_FILE" ]] || [[ "$(grep "last_objective" "$MARKER_FILE" | awk '{print $2}')" != "$OBJECTIVE" ]]; then
+        LOG_INFO "Initializing environment for $OBJECTIVE..."
+        SETUP_OBJECTIVE_ENV || ERROR_EXIT "Setup failed"
+        echo "last_objective $OBJECTIVE" > "$MARKER_FILE"
     fi
 
     local LAYERS=()
@@ -194,7 +194,7 @@ _BUILD_ROM() {
 
     _APKTOOL_PATCH || ERROR_EXIT "APK patching failed"
     REPACK_ROM "$FILESYSTEM" || ERROR_EXIT "Repack failed"
-    LOG_END "Build Successful for $TARGET"
+    LOG_END "Build Successful for $OBJECTIVE"
 }
 
 show_usage()
@@ -223,8 +223,8 @@ Clean Options:
       --workdir             Remove unpacked firmware.
       --all                 Remove firmware + workspace + workdir + out.
 
-Available TARGETs:
-  ${AVAILABLE_TARGETS[*]:-  (No TARGETs found in $OBJECTIVES_DIR)}
+Available OBJECTIVEs:
+  ${AVAILABLE_OBJECTIVES[*]:-  (No objectives found in $OBJECTIVES_DIR)}
 
 Environment:
   Root privileges are required for build and clean operations.
@@ -236,25 +236,25 @@ EOF
 }
 
 cleanup_workspace() {
-    local TARGETS=()
+    local OBJECTIVES=()
     local ALL=false
 
     for arg in "$@"; do
         case "$arg" in
-            -f|--firmware)  TARGETS+=("$WORKDIR") ;;
-            -w|--workspace) TARGETS+=("$WORKSPACE") ;;
-            --workdir)     TARGETS+=("$WORKDIR") ;;
+            -f|--firmware)  OBJECTIVES+=("$WORKDIR") ;;
+            -w|--workspace) OBJECTIVES+=("$WORKSPACE") ;;
+            --workdir)     OBJECTIVES+=("$WORKDIR") ;;
             --all)          ALL=true ;;
         esac
     done
 
     if $ALL; then
-        TARGETS=("$WORKSPACE" "$WORKDIR" "$DIROUT")
+        OBJECTIVES=("$WORKSPACE" "$WORKDIR" "$DIROUT")
     fi
 
-    [[ ${#TARGETS[@]} -eq 0 ]] && { LOG_WARN "Nothing to clean. Try --all"; return 0; }
+    [[ ${#OBJECTIVES[@]} -eq 0 ]] && { LOG_WARN "Nothing to clean. Try --all"; return 0; }
 
-    for P in "${TARGETS[@]}"; do
+    for P in "${OBJECTIVES[@]}"; do
         if [[ -d "$P" ]]; then
             LOG_INFO "Cleaning: $(basename "$P")"
             rm -rf "$P"
@@ -264,26 +264,55 @@ cleanup_workspace() {
     LOG_INFO "Cleanup finished."
 }
 
-COMMAND=""
+COMMAND="build"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --debug|-d) DEBUG_BUILD=true; shift ;;
-        build|-b)   COMMAND="build"; [[ -n "$2" && "$2" != -* ]] && { TARGET="$2"; shift; }; shift ;;
-        clean|-c)   COMMAND="clean"; shift; break ;;
-        version|-v) echo "AstroROM v$ROM_VERSION"; exit 0 ;;
-        help|-h)    COMMAND="help"; break ;;
-        *)          [[ -z "$TARGET" ]] && TARGET="$1"; shift ;;
+        --debug|-d)
+            DEBUG_BUILD=true
+            shift
+            ;;
+        --build|-b)
+            COMMAND="build"
+            shift
+            if [[ -n "${1:-}" && "$1" != -* ]]; then
+                TARGET="$1"
+                shift
+            fi
+            ;;
+        --clean|-c)
+            COMMAND="clean"
+            shift
+            break
+            ;;
+        --version|-v)
+            echo "AstroROM v$ROM_VERSION"
+            exit 0
+            ;;
+        --help|-h)
+            show_usage
+            exit 0
+            ;;
+        *)
+            TARGET="$1"
+            shift
+            ;;
     esac
 done
 
-[[ $EUID -ne 0 ]] && ERROR_EXIT "Root privileges required."
-
 case "$COMMAND" in
-    clean) cleanup_workspace "$@" ;;
-    help)  _SHOW_USAGE ;;
-    *)     _BUILD_ROM ;;
+    --build)
+        [[ $EUID -ne 0 ]] && ERROR_EXIT "Root privileges required."
+        _BUILD_ROM
+        ;;
+    --clean)
+        [[ $EUID -ne 0 ]] && ERROR_EXIT "Root privileges required."
+        cleanup_workspace "$@"
+        ;;
+    *)
+        show_usage
+        exit 1
+        ;;
 esac
 
-[[ $EUID -ne 0 ]] && ERROR_EXIT "Root required"
 
-_BUILD_ROM
