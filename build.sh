@@ -15,34 +15,30 @@
 #  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 #
 
-set -o pipefail
 
-ASTROROM="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export ASTROROM
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ASTROROM=$HERE
 
-ROM_VERSION="2.1.Spring"
+# Versioning
+VERSION_MAJOR="2"
+VERSION_MINOR="1"
+VERSION_PATCH="2"
+VERSION_SUFFIX="-ramadan"
+ROM_VERSION=$(echo "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}${VERSION_SUFFIX}" | sed -E 's/\.+/./g; s/\.$//')
 
-BETA_ASSERT=0
+# Defaults
+BETA_ASSERT=false
 BETA_OTA_URL=""
-export BETA_ASSERT BETA_OTA_URL
-
 DEBUG_BUILD=false
+TARGET=""
+PLATFORM=""
+CODENAME=""
 
+# Directories 
 PREBUILTS=$ASTROROM/prebuilts
-
 PROJECT_DIR="$ASTROROM/astro"
 OBJECTIVES_DIR="$ASTROROM/objectives"
 BLOBS_DIR="$ASTROROM/blobs"
-
-AVAILABLE_DEVICES=()
-
-if [[ -d "$OBJECTIVES_DIR" ]]; then
-    for D in "$OBJECTIVES_DIR"/*/; do
-        [[ -d "$D" ]] || continue
-        AVAILABLE_DEVICES+=("$(basename "$D")")
-    done
-fi
-
 WORKDIR="$ASTROROM/firmware/unpacked"
 WORKSPACE="$ASTROROM/workspace"
 DIROUT="$ASTROROM/out"
@@ -53,18 +49,26 @@ EXTRA_FW="${WORKDIR}/${EXTRA_MODEL}"
 
 MARKER_FILE="$WORKSPACE/.build_markers"
 
-PLATFORM=""
-CODENAME=""
+
+
+AVAILABLE_TARGETS=()
+
+if [[ -d "$OBJECTIVES_DIR" ]]; then
+    for D in "$OBJECTIVES_DIR"/*/; do
+        [[ -d "$D" ]] || continue
+        AVAILABLE_TARGETS+=("$(basename "$D")")
+    done
+fi
+
 
 shopt -s globstar
-
 for UTIL in "$ASTROROM"/scripts/**/*.sh; do
     if [[ -f "$UTIL" ]]; then
         source "$UTIL"
     fi
 done
 
-USE_THREADS() {
+GET_THREAD_COUNT() {
     local CPU_CORES
     local TOTAL_MEM_GB
     local THREADS
@@ -90,316 +94,195 @@ USE_THREADS() {
     echo "$THREADS"
 }
 
-USABLE_THREADS="$(USE_THREADS)"
+USABLE_THREADS="$(GET_THREAD_COUNT)"
 
-EXEC_SCRIPT()
-{
+PARSE_MODULE_PROP() {
+    local PROP_FILE="$1"
+    local KEY="$2"
+    if [[ -f "$PROP_FILE" ]]; then
+        grep "^${KEY}=" "$PROP_FILE" | cut -d'=' -f2- | sed "s/['\"]//g"
+    fi
+}
+
+EXEC_SCRIPT() {
     local SCRIPT_FILE="$1"
     local MARKER="$2"
+    local MOD_NAME="$3"
+    local MOD_AUTHOR="$4"
 
-    export SCRPATH
-    SCRPATH=$(cd "$(dirname "$SCRIPT_FILE")" && pwd)
-
-    local SCRIPT_PATHS="${SCRIPT_FILE#$ASTROROM/}"
-
-    local CURRENT_HASH CACHED_HASH
+    local CURRENT_HASH
     CURRENT_HASH=$(md5sum "$SCRIPT_FILE" 2>/dev/null | awk '{print $1}')
-    [[ -z "$CURRENT_HASH" ]] && ERROR_EXIT "Hash failed: $SCRIPT_PATHS"
-
-    CACHED_HASH=$(grep -F "$SCRIPT_FILE" "$MARKER" 2>/dev/null | awk '{print $2}')
-
-    if [[ "$CACHED_HASH" == "$CURRENT_HASH" ]]; then
+    
+    if grep -q "$SCRIPT_FILE $CURRENT_HASH" "$MARKER" 2>/dev/null; then
+        LOG_INFO "Skipping $MOD_NAME (already applied)"
         return 0
     fi
 
+    LOG "Applying $MOD_NAME"
+    [[ -n "$MOD_AUTHOR" ]] && LOG "    └─ by $MOD_AUTHOR"
 
+    export SCRPATH && SCRPATH=$(cd "$(dirname "$SCRIPT_FILE")" && pwd)
+    
     if ! source "$SCRIPT_FILE"; then
-        local RC=$?
-        ERROR_EXIT "Script failed in $SCRIPT_PATHS (exit $RC)"
+        ERROR_EXIT "Failed to apply $MOD_NAME"
     fi
 
     unset SCRPATH
-
     mkdir -p "$(dirname "$MARKER")"
     sed -i "\|^$SCRIPT_FILE |d" "$MARKER" 2>/dev/null || true
     echo "$SCRIPT_FILE $CURRENT_HASH" >> "$MARKER"
 }
 
-_BUILD_ROM()
-{
-    rm -rf "$ASTROROM/out" && mkdir -p "$ASTROROM/out"
 
-    CHECK_ALL_DEPENDENCIES
-    chmod +x -R "$PREBUILTS"
 
-    if [[ -z "$DEVICE" ]]; then
-        [[ ! -d "$OBJECTIVES_DIR" ]] && \
-            ERROR_EXIT "objective folder not found: $OBJECTIVES_DIR"
-
-        local DEVICES=()
+_BUILD_ROM() {
+    rm -rf "$DIROUT" && mkdir -p "$DIROUT"
+    
+    # Check for available objectives
+    AVAILABLE_TARGETS=()
+    if [[ -d "$OBJECTIVES_DIR" ]]; then
         for D in "$OBJECTIVES_DIR"/*/; do
-            [[ -d "$D" ]] || continue
-            DEVICES+=("$(basename "$D")")
+            [[ -d "$D" ]] && AVAILABLE_TARGETS+=("$(basename "$D")")
         done
-
-        [[ ${#DEVICES[@]} -eq 0 ]] && \
-            ERROR_EXIT "No objectives found in $OBJECTIVES_DIR"
-
-        local CHOICE=$(_CHOICE "Available objectives" "${DEVICES[@]}")
-        DEVICE="${DEVICES[CHOICE-1]}"
     fi
 
-    OBJECTIVE="$OBJECTIVES_DIR/$DEVICE"
+    if [[ -z "$TARGET" ]]; then
+        [[ ${#AVAILABLE_TARGETS[@]} -eq 0 ]] && ERROR_EXIT "No objectives found."
+        local CHOICE
+        CHOICE=$(PROMPT_CHOICE "Select Target TARGET" "${AVAILABLE_TARGETS[@]}")
+        TARGET="${AVAILABLE_TARGETS[CHOICE-1]}"
+    fi
+
+    OBJECTIVE="$OBJECTIVES_DIR/$TARGET"
     export OBJECTIVE
+    source "$OBJECTIVE/$TARGET.sh" || ERROR_EXIT "TARGET config load failed"
 
-    source "$OBJECTIVE/$DEVICE.sh" || ERROR_EXIT "Device config load failed"
-
-    # Github Ubuntu runners have 72GB storage only. So skip extra firmwares
-    if  IS_GITHUB_ACTIONS; then
-        unset EXTRA_MODEL
-        unset EXTRA_CSC
-        unset EXTRA_IMEI
-    fi
-
-    local META_TAG="last_objective"
-    local LAST_DEVICE=""
-    local SCRIPT_COUNT=0
-    local MARKER_EXISTS=false
-
-    if [[ -f "$MARKER_FILE" ]]; then
-        MARKER_EXISTS=true
-        LAST_DEVICE=$(awk "/^$META_TAG / {print \$2}" "$MARKER_FILE")
-        SCRIPT_COUNT=$(awk "!/^$META_TAG / {c++} END {print c+0}" "$MARKER_FILE")
-    fi
-
-    if ! $MARKER_EXISTS || [[ "$LAST_DEVICE" != "$DEVICE" ]] || [[ "$SCRIPT_COUNT" -eq 0 ]]; then
-        LOG_INFO "Initializing device environment for $DEVICE"
-
-        SETUP_DEVICE_ENV || ERROR_EXIT "environment setup failed"
-
-        mkdir -p "$(dirname "$MARKER_FILE")"
-        sed -i "/^$META_TAG /d" "$MARKER_FILE" 2>/dev/null || true
-        echo "$META_TAG $DEVICE" >> "$MARKER_FILE"
+    # Setup Environment
+    if [[ ! -f "$MARKER_FILE" ]] || [[ "$(grep "last_objective" "$MARKER_FILE" | awk '{print $2}')" != "$TARGET" ]]; then
+        LOG_INFO "Initializing environment for $TARGET..."
+        SETUP_TARGET_ENV || ERROR_EXIT "Setup failed"
+        echo "last_objective $TARGET" > "$MARKER_FILE"
     fi
 
     local LAYERS=()
-
-    if [[ -n "$PLATFORM" ]]; then
-        PLATFORM_DIR="$ASTROROM/platform/$PLATFORM"
-        LAYERS+=("$PLATFORM_DIR")
-    fi
-
-    LAYERS+=(
-        "$PROJECT_DIR"
-        "$OBJECTIVE"
-    )
+    [[ -n "$PLATFORM" ]] && LAYERS+=("$ASTROROM/platform/$PLATFORM")
+    LAYERS+=("$PROJECT_DIR" "$OBJECTIVE")
 
     for LAYER in "${LAYERS[@]}"; do
         [[ ! -d "$LAYER" ]] && continue
 
-        # Execute scripts
-        while IFS= read -r -d '' SH; do
-            [[ "$SH" == *"$DEVICE.sh" ]] && continue
-
-
-            local MOD_NAME MOD_AUTHOR
-
-            MOD_NAME=$(grep "^# MOD_NAME=" "$SH" | cut -d'=' -f2- | sed 's/"//g;s/'\''//g')
-            MOD_AUTHOR=$(grep "^# MOD_AUTHOR=" "$SH" | cut -d'=' -f2- | sed 's/"//g;s/'\''//g')
-
-            if [[ -z "$MOD_NAME" ]]; then
-                MOD_NAME=$(basename "$SH")
-                LOG_BEGIN "Applying $MOD_NAME"
-            else
-                LOG_BEGIN "• $MOD_NAME"
-                [[ -n "$MOD_AUTHOR" ]] && LOG "  └─ by $MOD_AUTHOR"
-            fi
-
-
-            EXEC_SCRIPT "$SH" "$MARKER_FILE"
-
-        done < <(
-            find "$LAYER" -type f -name "*.sh" \
-                ! -path "*.apk/*" \
-                ! -path "*.jar/*" \
-                -print0 | sort -z | while IFS= read -r -d '' FILE; do
-
-                DIR="$(dirname "$FILE")"
-                PARENT="$DIR"
-                SKIP_FILE=false
-
-                while [[ "$PARENT" != "$LAYER" && "$PARENT" != "/" ]]; do
-                    if [[ -f "$PARENT/.no" ]]; then
-                        if [[ "$DIR" != "$PARENT" ]]; then
-                            SKIP_FILE=true
-                        fi
-                        break
-                    fi
-                    PARENT="$(dirname "$PARENT")"
-                done
-
-                if [[ "$SKIP_FILE" == "false" ]]; then
-                    printf '%s\0' "$FILE"
-                fi
+        find "$LAYER" -type f -name "customize.sh" -print0 | sort -z | while IFS= read -r -d '' SH; do
+            DIR="$(dirname "$SH")"
+            
+            PARENT="$DIR"
+            while [[ "$PARENT" != "$LAYER" && "$PARENT" != "/" ]]; do
+                if [[ -f "$PARENT/.no" ]]; then continue 2; fi
+                PARENT="$(dirname "$PARENT")"
             done
-        )
 
-        # Append configs
-        while IFS= read -r -d '' CFG; do
-            NAME="$(basename "$CFG")"
-            TARGET="$CONFIG_DIR/$NAME"
+            # Metadata extraction
+            local PROP="$DIR/module.prop"
+            local NAME AUTHOR
+            NAME=$(PARSE_MODULE_PROP "$PROP" "name")
+            AUTHOR=$(PARSE_MODULE_PROP "$PROP" "author")
+            
+            [[ -z "$NAME" ]] && NAME=$(basename "$DIR")
 
-            if [[ ! -f "$TARGET" ]]; then
-                cp "$CFG" "$TARGET"
-            else
-                while IFS= read -r LINE; do
-
-                    PATH=$(echo "$LINE" | awk '{print $1}')
-                    if [[ -n "$PATH" ]]; then
-                        sed -i "\|^$PATH |d" "$TARGET"
-                    fi
-                    echo "$LINE" >> "$TARGET"
-                done < "$CFG"
-            fi
-        done < <(find "$LAYER" -type f \( -name "*_file_contexts" -o -name "*_fs_config" \) -print0)
-
-        # Sync partitions
-        while IFS= read -r -d '' IMG; do
-            PART=$(basename "$IMG" .img)
-            if TARGET=$(GET_PARTITION_PATH "$PART" 2>/dev/null); then
-                mkdir -p "$TARGET"
-                rsync -a --no-links "$IMG/" "$TARGET/" \
-                    || ERROR_EXIT "Adding files failed for $PART"
-            else
-                ERROR_EXIT "Unknown partition. $PART"
-            fi
-        done < <(find "$LAYER" -type d -name "*.img" -print0)
+            EXEC_SCRIPT "$SH" "$MARKER_FILE" "$NAME" "$AUTHOR"
+        done
     done
 
-    _APKTOOL_PATCH || ERROR_EXIT "APK/JAR patching failed"
+    _APKTOOL_PATCH || ERROR_EXIT "APK patching failed"
     REPACK_ROM "$FILESYSTEM" || ERROR_EXIT "Repack failed"
-
-    LOG_END "Build completed for $DEVICE"
+    LOG_END "Build Successful for $TARGET"
 }
 
 show_usage()
 {
 cat <<EOF
-
-AstroROM Build Tool v${ROM_VERSION}
+AstroROM v${ROM_VERSION} - Samsung Android ROM Build System
 Copyright (c) 2025 Sameer Al Sahab
+Licensed under MIT License
 
-USAGE:
- sudo ./build.sh [options] [command] [device:-optional]
-  or
- sudo bash build.sh [options] [command] [device-optional]
+Usage:
+  build.sh [options] <command> [TARGET]
 
-COMMANDS:
-  -b, --build [device]      Build ROM for a specific device.
-                            If [device] is not given, a selection menu will appear.
-  -c, --clean [option]      Cleanup build artifacts.
-  -h, --help                Show usage.
-      --ota-url [link]      Build astrorom from a beta firmware source.
+Commands:
+  build,   -b [TARGET]      Build ROM for specified TARGET.
+  clean,   -c [options]     Remove build artifacts.
+  help,    -h               Show this help message.
+  version, -v               Show version information.
 
-CLEAN OPTIONS:
-  -f, --firmware            Remove downloaded firmware files.
-  -w, --workspace           Remove the workspace directory.
-  --workdir                 Remove the unpacked firmware directory.
-  --all                     Perform a full cleanup (firmware + workspace + workdir).
+Build Options:
+  -d, --debug               Enable debug build mode.
+      --ota-url <url>       Use beta firmware from OTA URL.
 
-OPTIONS:
-  -d, --debug               Build a debug rom for testing.
+Clean Options:
+  -f, --firmware            Remove downloaded firmware.
+  -w, --workspace           Remove workspace directory.
+      --workdir             Remove unpacked firmware.
+      --all                 Remove firmware + workspace + workdir + out.
 
-AVAILABLE OBJECTIVES:
-  ${AVAILABLE_DEVICES[*]:-None found in $OBJECTIVES_DIR}
+Available TARGETs:
+  ${AVAILABLE_TARGETS[*]:-  (No TARGETs found in $OBJECTIVES_DIR)}
 
-
-EXAMPLES:
-  sudo ./build.sh build x1q
-  sudo ./build.sh b
-  sudo ./build.sh clean --workspace
-  sudo ./build.sh clean --all
-
-
-NOTE:
+Environment:
   Root privileges are required for build and clean operations.
+
+Project Home:
+  https://github.com/SameerAlSahab/AstroROM
 
 EOF
 }
 
-cleanup_workspace()
-{
+cleanup_workspace() {
     local TARGETS=()
+    local ALL=false
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -f|--firmware)  TARGETS+=("$FW_DIR") ;;
+    for arg in "$@"; do
+        case "$arg" in
+            -f|--firmware)  TARGETS+=("$WORKDIR") ;;
             -w|--workspace) TARGETS+=("$WORKSPACE") ;;
-            --all)
-                TARGETS+=("$FW_DIR" "$WORKSPACE")
-                ;;
-            *)
-                LOG_WARN "Unknown clean option: $1"
-                ;;
+            --workdir)     TARGETS+=("$WORKDIR") ;;
+            --all)          ALL=true ;;
         esac
-        shift
     done
 
-    [[ ${#TARGETS[@]} -eq 0 ]] && {
-        LOG_WARN "Nothing to clean"
-        return 0
-    }
+    if $ALL; then
+        TARGETS=("$WORKSPACE" "$WORKDIR" "$DIROUT")
+    fi
 
-    for PATH in "${TARGETS[@]}"; do
-        [[ -d "$PATH" ]] || continue
-        LOG_INFO "Removing ${PATH#$ASTROROM/}"
-        rm -rf "$PATH" || ERROR_EXIT "Failed to remove $PATH"
+    [[ ${#TARGETS[@]} -eq 0 ]] && { LOG_WARN "Nothing to clean. Try --all"; return 0; }
+
+    for P in "${TARGETS[@]}"; do
+        if [[ -d "$P" ]]; then
+            LOG_INFO "Cleaning: $(basename "$P")"
+            rm -rf "$P"
+        fi
     done
-
-    rm -f "$MARKER_FILE" 2>/dev/null || true
-    LOG "Cleanup completed"
+    rm -f "$MARKER_FILE"
+    LOG_INFO "Cleanup finished."
 }
 
-DEVICE=""
-
+COMMAND=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --debug|-d)
-            DEBUG_BUILD=true
-            shift
-            ;;
-        --build|-b)
-            if [[ -n "$2" && "$2" != -* ]]; then
-                DEVICE="$2"
-                shift 2
-            else
-                shift 1
-            fi
-            ;;
-        --clean|-c)
-            cleanup_workspace "${@:2}"
-            exit 0
-            ;;
-        --help|-h)
-            show_usage
-            exit 0
-            ;;
-        --ota-url)
-            [[ -z "$2" || "$2" == -* ]] && ERROR_EXIT "--ota-url requires a direct link"
-            BETA_ASSERT=1
-            BETA_OTA_URL="$2"
-            export BETA_ASSERT BETA_OTA_URL
-            shift 2
-            ;;
-
-        *)
-            if [[ -z "$DEVICE" ]]; then
-                DEVICE="$1"
-            fi
-            shift
-            ;;
+        --debug|-d) DEBUG_BUILD=true; shift ;;
+        build|-b)   COMMAND="build"; [[ -n "$2" && "$2" != -* ]] && { TARGET="$2"; shift; }; shift ;;
+        clean|-c)   COMMAND="clean"; shift; break ;;
+        version|-v) echo "AstroROM v$ROM_VERSION"; exit 0 ;;
+        help|-h)    COMMAND="help"; break ;;
+        *)          [[ -z "$TARGET" ]] && TARGET="$1"; shift ;;
     esac
 done
+
+[[ $EUID -ne 0 ]] && ERROR_EXIT "Root privileges required."
+
+case "$COMMAND" in
+    clean) cleanup_workspace "$@" ;;
+    help)  _SHOW_USAGE ;;
+    *)     _BUILD_ROM ;;
+esac
 
 [[ $EUID -ne 0 ]] && ERROR_EXIT "Root required"
 
