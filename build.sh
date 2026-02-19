@@ -205,10 +205,10 @@ Copyright (c) 2025 Sameer Al Sahab
 Licensed under MIT License
 
 Usage:
-  build.sh [options] <command> [TARGET]
+  build.sh [options] <command> [objective]
 
 Commands:
-  build,   -b [TARGET]      Build ROM for specified TARGET.
+  build,   -b [objective]      Build ROM for specified objective.
   clean,   -c [options]     Remove build artifacts.
   help,    -h               Show this help message.
   version, -v               Show version information.
