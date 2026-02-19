@@ -4,22 +4,13 @@
 #  Licensed under the MIT License. See LICENSE file for details.
 #
 
-# Special Thanks to @BlackMesa123 for his help and hints on github issues
-
-# https://github.com/iBotPeaches/Apktool/issues/3775
-# https://github.com/iBotPeaches/Apktool/pull/3879
-# https://github.com/SameerAlSahab/smali_patch/blob/main/smali_patch.py
-# https://github.com/iBotPeaches/Apktool/issues/1775
-
 
 PATCH_MARKER_FILE="$WORKSPACE/.patch_markers"
 
-DO_SIGN_APK="false"  # coz disabled apk signature verification on framework.jar as of now
+DO_SIGN_APK=true 
+DECOMPILE_RES=true
 CERT_PEM=""
 CERT_PK8=""
-
-DECOMPILE_RES=true
-
 
 declare -A PATCH_CACHE
 
@@ -29,7 +20,7 @@ INSTALL_FRAMEWORK()
     local SDK="$DEFAULT_SDK"
 
     if [[ -f "$BUILD_PROP" ]]; then
-        local PROP_SDK=$(BPROP "system" "ro.build.version.sdk" | cut -d'=' -f2 | tr -d '[:space:]')
+        local PROP_SDK=$(GET_PROP "system" "ro.build.version.sdk" | cut -d'=' -f2 | tr -d '[:space:]')
         [[ -n "$PROP_SDK" ]] && SDK="$PROP_SDK"
     fi
 
@@ -47,41 +38,7 @@ INSTALL_FRAMEWORK()
     echo "$SDK"
 }
 
-FIND_TARGET()
-{
-    local FILE_NAME="$1"
 
-    # JAR files are at system/framework
-    if [[ "$FILE_NAME" == *.jar ]]; then
-        local SYSTEM_DIR=$(GET_PARTITION_PATH "system") || true
-        if [[ -n "$SYSTEM_DIR" && -f "$SYSTEM_DIR/framework/$FILE_NAME" ]]; then
-            echo "$SYSTEM_DIR/framework/$FILE_NAME"
-            return 0
-        fi
-    fi
-
-    # As of now , we dont need partition paths except them
-    if [[ "$FILE_NAME" == *.apk ]]; then
-        local PARTITIONS=("system" "system_ext" "product")
-        for PART in "${PARTITIONS[@]}"; do
-            local PART_DIR=$(GET_PARTITION_PATH "$PART") || continue
-            [[ -z "$PART_DIR" || ! -d "$PART_DIR" ]] && continue
-
-            # For now we take app and priv-app cause preload and hidden apps are useless.
-            local SUBDIRS=("app" "priv-app" "overlay")
-            for SUBDIR in "${SUBDIRS[@]}"; do
-                [[ ! -d "$PART_DIR/$SUBDIR" ]] && continue
-                local FOUND=$(find "$PART_DIR/$SUBDIR" -maxdepth 3 -name "$FILE_NAME" -print -quit 2>/dev/null)
-                if [[ -n "$FOUND" ]]; then
-                    echo "$FOUND"
-                    return 0
-                fi
-            done
-        done
-    fi
-
-    return 1
-}
 
 DECOMPILE()
 {
@@ -109,7 +66,7 @@ DECOMPILE()
         # Standard flags
         local FLAGS=("-f" "-j" "$USABLE_THREADS" "-o" "$WORK_DIR" "-p" "$FRAMEWORK_DIR"  )
 
-        if ! GET_FEATURE "DECOMPILE_RES" || [[ "$IN_LIST" != "true" ]]; then
+        if ! GET_FEATURE "DECOMPILE_RES"; then
             FLAGS+=("-r")
         fi
 
@@ -117,11 +74,6 @@ DECOMPILE()
         java -jar "$PREBUILTS/apktool/apktool.jar" d --no-debug-info "${FLAGS[@]}" "$FILE" > /dev/null 2>&1 || \
             ERROR_EXIT "Decompile failed"
 
-    # Extract extra resources for JARs (Issue found on OneUI6+)
-    if [[ "$EXT" == "jar" ]] && unzip -l "$FILE" | grep -q "debian.mime.types"; then
-        mkdir -p "$WORK_DIR/__res__"
-        unzip -qo "$FILE" "res/*" -d "$WORK_DIR/__res__"
-    fi
 
     LOG_END "Decompiled $NAME"
 }
@@ -164,7 +116,7 @@ BUILD()
     )
 
     if [[ "$EXT" == "apk" ]]; then
-        # -c: Copies original META-INF and manifest (Preserves original structure)
+        # -c: Copies original META-INF and manifest 
         APKTOOL_FLAGS+=("-c")
     fi
 
@@ -178,7 +130,6 @@ BUILD()
     fi
 
     if [[ "$EXT" == "apk" ]]; then
-        # Sign the apk if turned on
         if [[ "$DO_SIGN_APK" == "true" ]]; then
             LOG_INFO "Signing APK..."
             local UNSIGNED="$DIST_DIR/${NAME}.unsigned"
@@ -199,11 +150,6 @@ BUILD()
                 ERROR_EXIT "Apk Zipalign failed."
             fi
         fi
-    fi
-
-    # Add missing resources for JARs [Android14+ bug] See DECOMPILE function for more info.
-    if [[ "$EXT" == "jar" && -d "$WORK_DIR/__res__" ]]; then
-        (cd "$WORK_DIR/__res__" && zip -qr "$BUILT_FILE" .)
     fi
 
     mv -f "$BUILT_FILE" "$FILE"
@@ -274,22 +220,7 @@ BUILD_ALL()
     return 0
 }
 
-#https://github.com/iBotPeaches/Apktool/issues/3775
-GET_DEX_API()
-{
-    local DEX_FILE="$1"
-    local HEX_SIG=$(xxd -s 4 -l 4 -p "$DEX_FILE")
 
-    case "$HEX_SIG" in
-        "30333500") echo "23" ;;
-        "30333700") echo "25" ;;
-        "30333800") echo "27" ;;
-        "30333900") echo "29" ;;
-        "30343000") echo "34" ;;
-        "30343100") echo "35" ;;
-        *) echo "$DEFAULT_SDK" ;;
-    esac
-}
 
 _APKTOOL_PATCH()
 {
@@ -441,4 +372,40 @@ ADD_PATCH()
 
     cp -a "$SOURCE" "$DEST/" || \
         ERROR_EXIT "Failed to add patch $SOURCE to $DEST"
+}
+
+FIND_TARGET()
+{
+    local FILE_NAME="$1"
+
+    # JAR files are at system/framework
+    if [[ "$FILE_NAME" == *.jar ]]; then
+        local SYSTEM_DIR=$(GET_PARTITION_PATH "system") || true
+        if [[ -n "$SYSTEM_DIR" && -f "$SYSTEM_DIR/framework/$FILE_NAME" ]]; then
+            echo "$SYSTEM_DIR/framework/$FILE_NAME"
+            return 0
+        fi
+    fi
+
+    # As of now , we dont need partition paths except them
+    if [[ "$FILE_NAME" == *.apk ]]; then
+        local PARTITIONS=("system" "system_ext" "product")
+        for PART in "${PARTITIONS[@]}"; do
+            local PART_DIR=$(GET_PARTITION_PATH "$PART") || continue
+            [[ -z "$PART_DIR" || ! -d "$PART_DIR" ]] && continue
+
+            # For now we take app and priv-app cause preload and hidden apps are useless.
+            local SUBDIRS=("app" "priv-app" "overlay")
+            for SUBDIR in "${SUBDIRS[@]}"; do
+                [[ ! -d "$PART_DIR/$SUBDIR" ]] && continue
+                local FOUND=$(find "$PART_DIR/$SUBDIR" -maxdepth 3 -name "$FILE_NAME" -print -quit 2>/dev/null)
+                if [[ -n "$FOUND" ]]; then
+                    echo "$FOUND"
+                    return 0
+                fi
+            done
+        done
+    fi
+
+    return 1
 }
