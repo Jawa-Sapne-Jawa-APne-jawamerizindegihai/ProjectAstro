@@ -191,7 +191,7 @@ fi
 
     LOG_INFO "Automatic generated config:"
 
-    for VARIABLE_NAME in $(compgen -v DEVICE_ | sort); do
+    for VARIABLE_NAME in $(compgen -v | grep '^DEVICE_' | sort); do
         printf '  %s=%s\n' "$VARIABLE_NAME" "${!VARIABLE_NAME}"
     done
 }
